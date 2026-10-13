@@ -1,160 +1,174 @@
 import streamlit as st
 import pandas as pd
-import joblib
 import numpy as np
 import time
-from datetime import datetime # Rapor tarihi için eklendi
+import requests 
+from datetime import datetime
+import joblib
 
-# 1. Arayüz ayarları
-st.set_page_config(page_title="EHMS - Engine Health Monitoring System", layout="wide")
-st.title("✈️ Entegre Uçak Motoru Sağlık Takip Sistemi (EHMS)")
-st.markdown("---")
+# HATALI KISIM DÜZELTİLDİ: yeni_kullanici_ekle fonksiyonu import'tan çıkarıldı.
+from database import (veritabani_kur, is_emri_kaydet, tum_is_emirlerini_getir, 
+                      kullanici_dogrula, log_kaydet, tum_loglari_getir)
 
-# 2. Modelleri yükleme
-@st.cache_resource
-def modelleri_yukle():
-    try:
-        model = joblib.load('xgboost_rul_modeli.joblib')
-        scaler = joblib.load('veri_olceklendirici.joblib')
-        ozellik_sutunlari = joblib.load('ozellik_sutunlari.joblib')
-        return model, scaler, ozellik_sutunlari
-    except Exception as e:
-        st.error(f"Sistem başlatılamadı: {e}")
-        return None, None, None
+st.set_page_config(page_title="EHMS - Kurumsal Frontend", layout="wide")
+veritabani_kur()
 
-model, scaler, ozellik_sutunlari = modelleri_yukle()
+if 'giris_yapildi' not in st.session_state:
+    st.session_state.giris_yapildi = False
+    st.session_state.aktif_rol = ""
+    st.session_state.aktif_kullanici = ""
 
-# 3. Alt Sistem Haritalaması ve Fonksiyonlar
-ALT_SISTEMLER = {
-    'Yüksek Basınç Kompresörü (HPC)': ['Sensor_3', 'Sensor_7', 'Sensor_11', 'Sensor_17'],
-    'Türbin Modülü (HPT/LPT)': ['Sensor_4', 'Sensor_20', 'Sensor_21'],
-    'Fan ve Bypass Kanalı': ['Sensor_2', 'Sensor_8', 'Sensor_13', 'Sensor_15'],
-    'Çekirdek Motor / Yanma Odası': ['Sensor_9', 'Sensor_12', 'Sensor_14']
-}
-
-def ariza_kaynagi_bul(olcekli_veri_satiri, ozellik_isimleri):
-    degerler = dict(zip(ozellik_isimleri, olcekli_veri_satiri))
-    en_riskli_sistem = "Bilinmiyor"
-    maks_sapma = -1
-    for sistem, sensorler in ALT_SISTEMLER.items():
-        sistem_sapmalari = [degerler[s] for s in sensorler if s in degerler]
-        if sistem_sapmalari:
-            ortalama_sapma = np.mean(sistem_sapmalari)
-            if ortalama_sapma > maks_sapma:
-                maks_sapma = ortalama_sapma
-                en_riskli_sistem = sistem
-    return en_riskli_sistem
-
-def ucus_zorlugu_hesapla(op_1, op_2, op_3):
-    stres_katsayisi = abs(op_1) + abs(op_2) + (100 - abs(op_3))
-    if stres_katsayisi > 20: return "Yüksek (Agresif Uçuş)"
-    elif stres_katsayisi > 5: return "Orta (Dalgalı Uçuş)"
-    else: return "Standart (Deniz Seviyesi)"
+try:
+    ozellik_sutunlari = joblib.load('ozellik_sutunlari_v2.joblib')
+except:
+    ozellik_sutunlari = []
 
 def durum_renklendir(val):
     if val < 50: return 'background-color: #ffcccc; color: #990000; font-weight: bold;'
     elif val < 100: return 'background-color: #fff3cc; color: #996600;'
     else: return 'background-color: #d4edda; color: #155724;'
 
-# YENİ: Otonom İş Emri (Work Order) Oluşturucu
 def is_emri_olustur(motor_id, ucus_sayisi, rul, kaynak, zorluk):
     zaman = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    rapor = f"""
-    ===============================================================
-    TUSAŞ/TÜBİTAK - ENTEGRE UÇAK MOTORU SAĞLIK TAKİP SİSTEMİ (EHMS)
-    ===============================================================
-    BELGE TÜRÜ: ACİL BAKIM İŞ EMRİ (WORK ORDER)
-    TARİH/SAAT: {zaman}
-    
-    [MOTOR BİLGİLERİ]
-    Motor ID: {motor_id}
-    Tamamlanan Toplam Uçuş Döngüsü: {ucus_sayisi}
-    Uçuş Görev Profili (Stres): {zorluk}
-    
-    [YAPAY ZEKA TEŞHİSİ]
-    Kalan Faydalı Ömür (RUL): {rul} Uçuş (KRİTİK SEVİYE)
-    İzole Edilen Arıza Kaynağı: {kaynak}
-    
-    [OTONOM SİSTEM TAVSİYESİ VE AKSİYON]
-    Motorun tahmini ömrü 50 uçuşun altına düşmüştür. Yapay zeka 
-    algoritmaları arıza kök nedeni olarak '{kaynak}' 
-    modülünü işaret etmektedir. Motorun acilen uçuştan çekilerek ilgili 
-    bölgesinin boreskop (kamera) denetiminden geçirilmesi zorunludur.
-    ===============================================================
-    EHMS Otonom Karar Destek Sistemi
-    """
-    return rapor
+    return f"""===============================================================
+TUSAŞ/TÜBİTAK - EHMS OTONOM BAKIM İŞ EMRİ
+===============================================================
+TARİH/SAAT: {zaman}
+ONAYLAYAN YETKİLİ: {st.session_state.aktif_kullanici.upper()} ({st.session_state.aktif_rol})
+MOTOR ID: {motor_id}
+KALAN ÖMÜR: {rul} Uçuş
+ARIZA KAYNAĞI: {kaynak}
+==============================================================="""
 
-# 4. Sol Panel ve Veri Yükleme
-st.sidebar.header("📡 Telemetri Veri Girişi")
-yuklenen_dosya = st.sidebar.file_uploader("Motor Sensör Verisi Yükle", type=["txt", "csv"])
-
-if yuklenen_dosya is not None:
-    df_test = pd.read_csv(yuklenen_dosya, sep=r"\s+", header=None)
-    sutunlar = ['Motor_ID', 'Zaman_Dongusu', 'Op_Ayar_1', 'Op_Ayar_2', 'Op_Ayar_3'] + [f'Sensor_{i}' for i in range(1, 22)]
-    df_test.columns = sutunlar
+if not st.session_state.giris_yapildi:
+    st.title("🔒 EHMS Kurumsal Giriş Paneli")
+    st.markdown("Sisteme erişmek için yetkilendirilmiş kimlik bilgilerinizi giriniz.")
     
-    st.sidebar.markdown("---")
-    st.sidebar.header("🔴 Canlı İzleme Merkezi")
-    secilen_motor = st.sidebar.selectbox("İzlenecek Motoru Seçin", df_test['Motor_ID'].unique())
-    canli_yayin = st.sidebar.button("🚀 Canlı Telemetriyi Başlat")
-    
-    if canli_yayin:
-        st.subheader(f"📡 Motor {secilen_motor} - Canlı Uçuş Telemetrisi")
+    with st.form("giris_formu"):
+        kullanici = st.text_input("Kullanıcı Adı")
+        sifre = st.text_input("Şifre", type="password")
+        giris_butonu = st.form_submit_button("Sisteme Bağlan")
         
-        motor_verisi = df_test[df_test['Motor_ID'] == secilen_motor].copy()
-        
-        tablo_alani = st.empty()
-        uyari_alani = st.empty() # Acil uyarı butonu için boş alan
-        gecmis_veriler = pd.DataFrame()
-        
-        kritik_seviye_goruldu = False
-        son_durum = {}
-        
-        for index, row in motor_verisi.iterrows():
-            X_anlik = row[ozellik_sutunlari].values.reshape(1, -1)
-            X_anlik_olcekli = scaler.transform(pd.DataFrame(X_anlik, columns=ozellik_sutunlari))
-            
-            anlik_rul = int(model.predict(X_anlik_olcekli)[0])
-            kaynak = "Normal" if anlik_rul > 100 else ariza_kaynagi_bul(X_anlik_olcekli[0], ozellik_sutunlari)
-            zorluk = ucus_zorlugu_hesapla(row['Op_Ayar_1'], row['Op_Ayar_2'], row['Op_Ayar_3'])
-            
-            yeni_satir = {
-                'Zaman Döngüsü (Uçuş)': int(row['Zaman_Dongusu']),
-                'Anlık Kalan Ömür (RUL)': anlik_rul,
-                'Olası Arıza Kaynağı': kaynak,
-                'Uçuş Görev Profili': zorluk
-            }
-            
-            gecmis_veriler = pd.concat([gecmis_veriler, pd.DataFrame([yeni_satir])], ignore_index=True)
-            
-            gosterilecek = gecmis_veriler.tail(8).copy()
-            renkli_tablo = gosterilecek.style.map(durum_renklendir, subset=['Anlık Kalan Ömür (RUL)'])
-            
-            with tablo_alani:
-                st.dataframe(renkli_tablo, use_container_width=True, hide_index=True)
-            
-            # Eğer RUL 50'nin altına düşerse sistemi uyar
-            if anlik_rul < 50:
-                kritik_seviye_goruldu = True
-                son_durum = yeni_satir
-                
-            time.sleep(0.2)
-            
-        st.success(f"Motor {secilen_motor} için telemetri veri akışı tamamlandı.")
-        
-        # Uçuş bittiğinde veya kesildiğinde, eğer kritik seviye görüldüyse buton çıkar
-        if kritik_seviye_goruldu:
-            with uyari_alani:
-                rapor_metni = is_emri_olustur(secilen_motor, son_durum['Zaman Döngüsü (Uçuş)'], son_durum['Anlık Kalan Ömür (RUL)'], son_durum['Olası Arıza Kaynağı'], son_durum['Uçuş Görev Profili'])
-                st.error("⚠️ KRİTİK UYARI: Uçuş sırasında motor ömrü 50'nin altına düştü! Sistem otonom bakım iş emri üretti.")
-                st.download_button(
-                    label="📄 Acil Bakım İş Emrini İndir (TXT)",
-                    data=rapor_metni,
-                    file_name=f"Acil_Bakim_Emri_Motor_{secilen_motor}.txt",
-                    mime="text/plain"
-                )
-    else:
-        st.info("👈 Sol panelden bir motor seçin ve 'Canlı Telemetriyi Başlat' butonuna basarak sistemi test edin.")
+        if giris_butonu:
+            basarili, rol = kullanici_dogrula(kullanici, sifre)
+            if basarili:
+                st.session_state.giris_yapildi = True
+                st.session_state.aktif_kullanici = kullanici
+                st.session_state.aktif_rol = rol
+                log_kaydet(kullanici, "Sisteme başarılı giriş yaptı.")
+                st.rerun() 
+            else:
+                st.error("🚨 Yetkisiz Erişim Denemesi: Kullanıcı adı veya şifre hatalı.")
+                log_kaydet(kullanici, "Hatalı şifre denemesi.")
 else:
-    st.info("Sistemi test etmek için sol panelden bir uçuş telemetri dosyası yükleyiniz.")
+    kolon1, kolon2 = st.columns([8, 2])
+    with kolon1:
+        st.title("✈️ EHMS - Karar Destek Paneli")
+    with kolon2:
+        st.write(f"👤 **{st.session_state.aktif_kullanici.upper()}**")
+        st.write(f"🛡️ *{st.session_state.aktif_rol}*")
+        if st.button("🚪 Çıkış Yap"):
+            log_kaydet(st.session_state.aktif_kullanici, "Sistemden güvenli çıkış yaptı.")
+            st.session_state.giris_yapildi = False
+            st.rerun()
+            
+    st.markdown("---")
+    
+    st.sidebar.header("🗄️ Sistem Veritabanı")
+    if st.sidebar.button("Geçmiş İş Emirlerini Görüntüle"):
+        st.subheader("🗄️ Veritabanı Kayıtları: Geçmiş Acil İş Emirleri")
+        try:
+            gecmis_kayitlar = tum_is_emirlerini_getir()
+            if gecmis_kayitlar.empty:
+                st.info("Veritabanında henüz kayıtlı bir iş emri bulunmamaktadır.")
+            else:
+                st.dataframe(gecmis_kayitlar, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"Veritabanı okuma hatası: {e}")
+
+    if st.session_state.aktif_rol == "Sistem Yöneticisi":
+        if st.sidebar.button("🛡️ Güvenlik Loglarını İncele"):
+            st.subheader("🛡️ Sistem Güvenlik ve İşlem Günlüğü (Audit Logs)")
+            try:
+                log_kayitlari = tum_loglari_getir()
+                st.dataframe(log_kayitlari, use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.error(f"Log okuma hatası: {e}")
+                
+        # HATALI KISIM DÜZELTİLDİ: Kullanıcı ekleme paneli buradan tamamen kaldırıldı.
+
+    st.sidebar.markdown("---")
+    st.sidebar.header("📡 Telemetri Veri Girişi")
+    yuklenen_dosya = st.sidebar.file_uploader("Motor Sensör Verisi Yükle", type=["txt", "csv"])
+
+    if yuklenen_dosya is not None:
+        df_test = pd.read_csv(yuklenen_dosya, sep=r"\s+", header=None)
+        sutunlar = ['Motor_ID', 'Zaman_Dongusu', 'Op_Ayar_1', 'Op_Ayar_2', 'Op_Ayar_3'] + [f'Sensor_{i}' for i in range(1, 22)]
+        df_test.columns = sutunlar
+        
+        st.sidebar.markdown("---")
+        st.sidebar.header("🔴 Canlı İzleme Merkezi")
+        secilen_motor = st.sidebar.selectbox("İzlenecek Motoru Seçin", df_test['Motor_ID'].unique())
+        canli_yayin = st.sidebar.button("🚀 Canlı Telemetriyi Başlat")
+        
+        if canli_yayin:
+            log_kaydet(st.session_state.aktif_kullanici, f"Motor {secilen_motor} için canlı telemetri simülasyonunu başlattı.")
+            st.subheader(f"📡 Motor {secilen_motor} - Canlı Uçuş Telemetrisi (REST API Bağlantılı)")
+            motor_verisi = df_test[df_test['Motor_ID'] == secilen_motor].copy()
+            
+            tablo_alani = st.empty()
+            uyari_alani = st.empty()
+            gecmis_veriler = pd.DataFrame()
+            kritik_seviye_goruldu = False
+            son_durum = {}
+            
+            for index, row in motor_verisi.iterrows():
+                ham_tum_degerler = row[ozellik_sutunlari].values.tolist()
+                
+                try:
+                    payload = {"tum_degerler": ham_tum_degerler}
+                    api_cevap = requests.post("http://127.0.0.1:8000/tahmin/rul", json=payload)
+                    
+                    if api_cevap.status_code == 200:
+                        veri = api_cevap.json()
+                        anlik_rul = veri["kalan_omur_rul"]
+                        kaynak = veri["ariza_kaynagi"]
+                        zorluk = veri["ucus_profili"]
+                    else:
+                        st.error("API'den hatalı veri döndü.")
+                        break
+                except Exception as e:
+                    st.error(f"API Sunucusuna Bağlanılamadı! Hata: {e}")
+                    break
+                
+                yeni_satir = {
+                    'Zaman Döngüsü': int(row['Zaman_Dongusu']),
+                    'Anlık RUL': anlik_rul,
+                    'Olası Arıza Kaynağı': kaynak,
+                    'Uçuş Profili': zorluk
+                }
+                
+                gecmis_veriler = pd.concat([gecmis_veriler, pd.DataFrame([yeni_satir])], ignore_index=True)
+                
+                with tablo_alani:
+                    st.dataframe(gecmis_veriler.tail(8).style.map(durum_renklendir, subset=['Anlık RUL']), use_container_width=True, hide_index=True)
+                
+                if anlik_rul < 50:
+                    kritik_seviye_goruldu = True
+                    son_durum = yeni_satir
+                    
+                time.sleep(0.2)
+                
+            st.success(f"Motor {secilen_motor} için telemetri akışı bitti.")
+            
+            if kritik_seviye_goruldu:
+                with uyari_alani:
+                    rapor_metni = is_emri_olustur(secilen_motor, son_durum['Zaman Döngüsü'], son_durum['Anlık RUL'], son_durum['Olası Arıza Kaynağı'], son_durum['Uçuş Profili'])
+                    try:
+                        is_emri_kaydet(secilen_motor, son_durum['Anlık RUL'], son_durum['Olası Arıza Kaynağı'], son_durum['Uçuş Profili'], st.session_state.aktif_kullanici)
+                        log_kaydet(st.session_state.aktif_kullanici, f"Motor {secilen_motor} için otonom acil bakım iş emri oluşturuldu.")
+                        st.error("⚠️ KRİTİK UYARI: Uçuş sırasında motor ömrü 50'nin altına düştü! (Kayıt Veritabanına İşlendi)")
+                    except Exception as e:
+                        st.error(f"Kayıt Hatası: {e}")
+                        
+                    st.download_button("📄 İş Emrini İndir", data=rapor_metni, file_name=f"Acil_Bakim_Motor_{secilen_motor}.txt", mime="text/plain")
